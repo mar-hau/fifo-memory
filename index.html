@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FIFO Card Memory</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#fff; --ink:#1d2330; --muted:#6b7385; --line:#d5d9e2;
+    --ok:#c8f0d0; --okb:#2e9d4a; --ko:#f9cccc; --kob:#d33a3a;
+    --hid:#2b2f3a; --hid2:#363b49; --accent:#3b63d6;
+    --c-short:#3b63d6; --c-long:#e08a1e; /* chart line colours */
+    --move:.38s; /* duration of all card movements */
+    /* card geometry (overridden in compact view) */
+    --cw:56px; --ch:80px; --pitch:62px; --stageh:86px; --fr:24px; --fs:28px;
+  }
+  body.compact{ --cw:38px; --ch:54px; --pitch:44px; --stageh:60px; --fr:16px; --fs:19px; }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#14171e; --panel:#1d222c; --ink:#e8ebf2; --muted:#98a0b3; --line:#343b4a;
+      --ok:#1f4a2c; --okb:#4cc16c; --ko:#5a2424; --kob:#ff6b6b;
+      --hid:#0c0e13; --hid2:#161922; --accent:#7b9bff;
+      --c-short:#7b9bff; --c-long:#ffb454; }
+  }
+  @media (prefers-reduced-motion: reduce){ :root{ --move:.01s; } }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif;padding:16px}
+  main{max-width:1100px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 12px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+  .stats{display:flex;gap:22px;align-items:baseline;flex-wrap:wrap}
+  .stat b{font-size:22px;font-variant-numeric:tabular-nums}
+  .stat span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;display:block}
+  .okc{color:var(--okb)} .koc{color:var(--kob)}
+  .scroll{overflow-x:auto;padding-bottom:4px}
+  .lbl{font-size:12px;color:var(--muted);margin:8px 0 4px}
+
+  /* stages: cards are absolutely positioned and glide via transform */
+  .posrow{display:flex}
+  .pos{width:var(--pitch);flex:none;text-align:center;font-size:10px;color:var(--muted)}
+  .stage{position:relative;height:var(--stageh);overflow:hidden}
+  .stage.nomove .mv{transition:none !important}
+  .slot{position:absolute;top:3px;left:3px;width:var(--cw);height:var(--ch);border:1px dashed var(--line);border-radius:7px}
+
+  .card{width:var(--cw);height:var(--ch);border:1px solid var(--line);border-radius:7px;background:#fff;color:#111;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:600;position:relative;flex:none;user-select:none}
+  .card .r{font-size:var(--fr);line-height:1}
+  .card .s{font-size:var(--fs);line-height:1.1}
+  .card.red{color:#c62828}
+  .card.mv{position:absolute;left:3px;top:3px;will-change:transform;
+    transition:transform var(--move) cubic-bezier(.25,.8,.3,1), opacity var(--move) ease}
+
+  /* closed shield: cards slide in and out underneath it */
+  #shield{position:absolute;top:0;height:var(--stageh);z-index:5;border-radius:10px;pointer-events:none;
+    background:repeating-linear-gradient(45deg,var(--hid),var(--hid) 7px,var(--hid2) 7px,var(--hid2) 14px);
+    box-shadow:inset 0 0 0 2px #000a, 0 2px 8px #0005;
+    display:flex;align-items:flex-end;justify-content:center;transition:opacity .25s}
+  #shield span{color:#aab0c0;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding-bottom:3px}
+  #shield.peek{opacity:.3}
+
+  .card.ok{background:var(--ok);border:2px solid var(--okb);color:#111}
+  .card.ko{background:var(--ko);border:2px solid var(--kob);color:#111}
+  /* success during ramp-up: shown, but not counted */
+  .card.ok.soft{background:var(--panel);border-style:dashed;opacity:.75}
+  .card.ok::after,.card.ko::after{position:absolute;right:3px;top:1px;font-size:12px;font-weight:700}
+  .card.ok::after{content:"✓";color:var(--okb)}
+  .card.ko::after{content:"✗";color:var(--kob)}
+  .card.ko .r,.card.ko .s{text-decoration:underline wavy var(--kob) 1px}
+  .card.red.ok,.card.red.ko{color:#c62828}
+  .card.ok.soft.red{color:#c62828}
+  .card.ok.soft:not(.red){color:var(--ink)}
+
+  .choices{display:flex;gap:8px;flex-wrap:wrap}
+  button.card{cursor:pointer;font-family:inherit;padding:0}
+  button.card:hover{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}
+  button.card.cand{box-shadow:0 0 0 2px var(--accent)}
+  button.card .n{position:absolute;left:4px;top:2px;font-size:10px;font-weight:500;color:#8a90a0}
+  #tbar{height:4px;background:var(--line);border-radius:2px;margin-top:10px;overflow:hidden}
+  #tbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s linear}
+  .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-top:8px}
+  .charts canvas{width:100%;height:200px;display:block}
+  .legend{font-size:12px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap;margin-bottom:4px}
+  .legend b{color:var(--ink);font-weight:600}
+  .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+  .typed{min-height:22px;color:var(--muted);font-size:13px}
+  .hint{color:var(--muted);font-size:12px;margin-top:6px}
+  .settings{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 18px;align-items:end}
+  .settings label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:3px}
+  .settings label.chk{flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:13px}
+  input[type=number],select{font:inherit;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:100%}
+  .btn{font:inherit;padding:7px 14px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}
+  .btn.sec{background:transparent;color:var(--accent)}
+  .btns{display:flex;gap:8px;align-items:center;margin-left:auto}
+  .msg{color:var(--kob);font-size:12px;min-height:16px;margin-top:6px}
+
+  /* compact view: no titles / explanations, smaller cards, for phones in landscape */
+  body.compact{padding:6px}
+  body.compact h1, body.compact .lbl, body.compact .hint, body.compact .posrow,
+  body.compact #settingsPanel, body.compact #shield span, body.compact .legend span:first-child{display:none}
+  body.compact .panel{padding:6px 8px;margin-bottom:6px;border-radius:8px}
+  body.compact .stats{gap:14px}
+  body.compact .stat b{font-size:16px}
+  body.compact .stat span{font-size:9px}
+  body.compact .typed{min-height:0;font-size:11px}
+  body.compact #tbar{margin-top:6px}
+  body.compact .choices{gap:6px}
+  body.compact button.card .n{font-size:8px;left:3px;top:1px}
+  body.compact .card.ok::after, body.compact .card.ko::after{font-size:9px;right:2px;top:0}
+  body.compact .charts canvas{height:110px}
+  body.compact .btn{padding:4px 10px;font-size:12px}
+  body.compact #shield{border-radius:7px}
+</style>
+</head>
+<body>
+<main>
+  <h1>FIFO Card Memory</h1>
+
+  <div class="panel">
+    <div class="lbl">FIFO – new cards enter on the left →</div>
+    <div class="scroll">
+      <div class="posrow" id="posRow"></div>
+      <div class="stage" id="fifoStage"><div id="shield"><span>hidden</span></div></div>
+      <div class="lbl">Log – your guesses, moving along with the cards they predicted</div>
+      <div class="stage" id="logStage"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="lbl">Which card will leave the hidden area on the right?</div>
+    <div class="typed" id="status"></div>
+    <div class="choices" id="choices"></div>
+    <div id="tbar"><i></i></div>
+    <div class="typed" id="typed"></div>
+    <div class="hint" id="keyHint"></div>
+  </div>
+
+  <div class="panel stats">
+    <div class="stat okc"><b id="sOK">0</b><span>OK</span></div>
+    <div class="stat koc"><b id="sKO">0</b><span>KO</span></div>
+    <div class="stat"><b id="sPct">–</b><span>Correct %</span></div>
+    <div class="stat"><b id="sStreak">0</b><span>Streak (best <span id="sBest" style="display:inline;font-size:12px;text-transform:none">0</span>)</span></div>
+    <div class="stat"><b id="sAvg">–</b><span>Ø time (last <span id="sLast" style="display:inline;font-size:12px;text-transform:none">–</span>)</span></div>
+    <div class="btns">
+      <button class="btn sec" id="btnCompact">Compact</button>
+      <button class="btn sec" id="btnReset">Restart</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="lbl" style="margin:0">Progress – moving averages (history is kept in this browser)</div>
+      <div class="btns">
+        <span id="expMsg" style="font-size:12px;color:var(--muted)"></span>
+        <button class="btn sec" id="btnExport">Export JSON</button>
+        <button class="btn sec" id="btnCopy">Copy JSON</button>
+        <button class="btn sec" id="btnClear">Clear history</button>
+      </div>
+    </div>
+    <div class="charts">
+      <div><div class="legend" id="lgPct"></div><canvas id="cvPct"></canvas></div>
+      <div><div class="legend" id="lgTime"></div><canvas id="cvTime"></canvas></div>
+    </div>
+  </div>
+
+  <div class="panel" id="settingsPanel">
+    <div class="settings">
+      <label>FIFO length L<input type="number" id="pL" min="3" max="30"></label>
+      <label>Blackout start m (1 = leftmost)<input type="number" id="pM" min="1" max="29"></label>
+      <label>Blackout length n<input type="number" id="pN" min="1" max="28"></label>
+      <label>Choices k (2–10)<input type="number" id="pK" min="2" max="10"></label>
+      <label>Suits used (1–4)<input type="number" id="pS" min="1" max="4"></label>
+      <label>Ranks used (2–13)<input type="number" id="pR" min="2" max="13"></label>
+      <label>Ramp-up entries (-1 = ⌊n/2⌋)<input type="number" id="pRamp" min="-1" max="1000"></label>
+      <label>Top-row digit keys mean
+        <select id="pD"><option value="index">choice number</option><option value="rank">card rank</option></select>
+      </label>
+      <label>Warm-up step (ms, 100–3000)<input type="number" id="pW" min="100" max="3000" step="50"></label>
+      <label>Timeout per entry (s, 0 = off)<input type="number" id="pT" min="0" max="600" step="0.5"></label>
+      <label>Short average window (entries)<input type="number" id="pSW" min="1" max="1000"></label>
+      <label>Long average window (entries)<input type="number" id="pLW" min="1" max="5000"></label>
+      <label>Chart: last N entries (0 = all)<input type="number" id="pCN" min="0" max="5000"></label>
+      <label class="chk"><input type="checkbox" id="pP"> See through shield (practice)</label>
+      <label class="chk"><input type="checkbox" id="pC"> Compact view</label>
+      <div><button class="btn" id="btnApply">Apply &amp; restart</button></div>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const RANKS = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+const SUITS = ['♠','♥','♦','♣'].map(s => s + '\uFE0E'); // text presentation, no emoji
+const SUIT_KEYS = {s:0, h:1, d:2, c:3};
+const RANK_KEYS = {a:0, t:9, j:10, q:11, k:12};
+const DEFAULTS = {L:12, m:4, n:4, k:6, suits:4, ranks:13, digits:'index', peek:false, warm:500,
+                  timeout:0, sw:10, lw:50, cn:200, ramp:-1, compact:false};
+const MAX_HIST = 3000;   // maximum number of stored history entries
+let W = 62;              // horizontal pitch of one card slot in px (read from CSS --pitch)
+
+let P = loadParams();
+let fifo, log, choices, stats, keyBuf, keyTimer;
+let token = 0, warming = false, warmDone = 0, warmTotal = 0;
+let tStart = 0, tickTimer = null, notice = '';   // response-time measurement / timeout
+let firstGuessDone = false;   // shield stays see-through until the first guess has been entered
+let seqIdx = 0;               // number of entries since the last start/reset of the sequence
+
+const $ = id => document.getElementById(id);
+const fifoStage = $('fifoStage'), logStage = $('logStage'), shield = $('shield');
+
+function loadParams(){
+  try{ const j = JSON.parse(localStorage.getItem('fifoMemParams')); if(j) return Object.assign({}, DEFAULTS, j); }catch(e){}
+  return Object.assign({}, DEFAULTS);
+}
+function saveParams(){ try{ localStorage.setItem('fifoMemParams', JSON.stringify(P)); }catch(e){} }
+
+const rnd = n => Math.floor(Math.random()*n);
+function deckCards(){
+  const d = [];
+  for(let s=0;s<P.suits;s++) for(let r=0;r<P.ranks;r++) d.push({r,s});
+  return d;
+}
+function randCard(){ return {r:rnd(P.ranks), s:rnd(P.suits)}; }
+function same(a,b){ return a.r===b.r && a.s===b.s; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=rnd(i+1); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+function cardEl(c, cls, tag){
+  const e = document.createElement(tag||'div');
+  e.className = 'card' + ((c.s===1||c.s===2) ? ' red':'') + (cls?' '+cls:'');
+  e.innerHTML = '<span class="r">'+RANKS[c.r]+'</span><span class="s">'+SUITS[c.s]+'</span>';
+  return e;
+}
+
+/* ---------- movement helpers ---------- */
+const slotX = i => 'translateX(' + (i*W) + 'px)';
+// Move an element to slot i (CSS transition does the gliding).
+function moveTo(el, i){ el.style.transform = slotX(i); el.style.opacity = 1; }
+// Slide an element out to the right and remove it afterwards.
+function leave(el){
+  el.style.transform = slotX(P.L); el.style.opacity = 0;
+  setTimeout(() => el.remove(), 600);
+}
+
+function validate(){
+  const clamp = (v,lo,hi) => Math.max(lo, Math.min(hi, v|0));
+  P.suits = clamp(P.suits,1,4); P.ranks = clamp(P.ranks,2,13);
+  P.L = clamp(P.L,3,30);
+  P.n = clamp(P.n,1,P.L-1);
+  P.m = clamp(P.m,1,P.L-P.n);
+  P.k = clamp(P.k,2,Math.min(10, P.suits*P.ranks));
+  P.sw = clamp(P.sw,1,1000);
+  P.lw = clamp(P.lw,P.sw,5000);              // long window is never shorter than the short one
+  P.cn = clamp(P.cn,0,5000);
+  P.ramp = (P.ramp|0) < 0 ? -1 : Math.min(P.ramp|0, 1000);
+}
+// Number of entries after a start/reset in which successes are shown but not counted.
+const rampN = () => P.ramp >= 0 ? P.ramp : Math.floor(P.n/2);
+
+/* ---------- layout ---------- */
+const readPitch = () => parseInt(getComputedStyle(document.body).getPropertyValue('--pitch')) || 62;
+
+/* Build the static parts: position numbers, shield, log placeholders. */
+function buildStatic(){
+  W = readPitch();
+  const width = P.L*W + 'px';
+  $('posRow').style.width = fifoStage.style.width = logStage.style.width = width;
+  $('posRow').innerHTML = '';
+  for(let i=0;i<P.L;i++){ const p = document.createElement('div'); p.className='pos'; p.textContent=i+1; $('posRow').appendChild(p); }
+  fifoStage.innerHTML = ''; logStage.innerHTML = '';
+  fifoStage.appendChild(shield);
+  shield.style.left = ((P.m-1)*W) + 'px';
+  shield.style.width = (P.n*W) + 'px';
+  applyPeek();
+  // dashed placeholders in the log row, starting right after the blackout
+  for(let i=P.m+P.n-1;i<P.L;i++){
+    const s = document.createElement('div'); s.className='slot'; s.dataset.i = i; s.style.transform = slotX(i); logStage.appendChild(s);
+  }
+}
+function applyPeek(){ shield.classList.toggle('peek', !!P.peek || !firstGuessDone); }
+
+/* Re-layout after switching between normal and compact view (no restart, no animation). */
+function applyLayout(){
+  W = readPitch();
+  const width = P.L*W + 'px';
+  $('posRow').style.width = fifoStage.style.width = logStage.style.width = width;
+  shield.style.left = ((P.m-1)*W) + 'px';
+  shield.style.width = (P.n*W) + 'px';
+  fifoStage.classList.add('nomove'); logStage.classList.add('nomove');
+  logStage.querySelectorAll('.slot').forEach(s => { s.style.transform = slotX(+s.dataset.i); });
+  if(fifo) fifo.forEach((x,i) => { if(x) x.el.style.transform = slotX(i); });
+  if(log)  log.forEach((x,i)  => { if(x) x.el.style.transform = slotX(i); });
+  void fifoStage.offsetWidth;                // commit styles before transitions are re-enabled
+  fifoStage.classList.remove('nomove'); logStage.classList.remove('nomove');
+}
+function setCompact(on){
+  P.compact = !!on;
+  document.body.classList.toggle('compact', P.compact);
+  $('btnCompact').textContent = P.compact ? 'Full' : 'Compact';
+  $('pC').checked = P.compact;
+  saveParams();
+}
+
+/* ---------- response time + timeout ---------- */
+const fmt = ms => (ms/1000).toFixed(2) + ' s';
+function updateBar(el){
+  const bar = $('tbar');
+  bar.style.display = P.timeout > 0 ? '' : 'none';
+  bar.firstChild.style.width = P.timeout > 0 ? Math.max(0, 100 - 100*el/(P.timeout*1000)) + '%' : '0%';
+}
+function stopTimer(){ clearInterval(tickTimer); tickTimer = null; $('tbar').firstChild.style.width = '0%'; }
+// Timer runs from the moment the choices appear until a choice is made.
+function startTimer(){
+  stopTimer();
+  tStart = performance.now();
+  updateBar(0);
+  if(P.timeout > 0) tickTimer = setInterval(() => {
+    const el = performance.now() - tStart;
+    updateBar(el);
+    if(el >= P.timeout*1000) onTimeout();
+  }, 100);
+}
+// No entry within the timeout: counts as KO, the sequence restarts (new warm-up), statistics are kept.
+function onTimeout(){
+  stopTimer();
+  stats.ko++; stats.streak = 0;
+  addHist(false, null, true);                // timeout = counted KO without a time value
+  notice = 'Timeout – sequence reset. ';
+  newGame(true);
+}
+
+function newGame(keepStats){
+  validate();
+  token++;                                   // cancels a warm-up that may still be running
+  clearTimeout(keyTimer); stopTimer();
+  buildStatic();
+  seqIdx = 0;                                // ramp-up starts again with every start/reset
+  fifo = Array(P.L).fill(null);              // start with an empty FIFO
+  log = Array(P.L).fill(null);
+  if(!keepStats){ stats = {ok:0, ko:0, streak:0, best:0, sumT:0, nT:0, last:null}; notice = ''; }
+  keyBuf = {rank:null, suit:null};
+  choices = [];
+
+  // Warm-up: cards slide in automatically with the shield see-through; nothing is counted.
+  // After m+n-1 cards the first card has reached the end of the hidden area.
+  warming = true; firstGuessDone = false; warmDone = 0; warmTotal = P.m + P.n - 1;
+  applyPeek();
+  renderUI();
+  const my = token;
+  const step = () => {
+    if(my !== token) return;
+    pushCard(); warmDone++; renderUI();
+    if(warmDone < warmTotal) setTimeout(step, P.warm);
+    else setTimeout(() => {
+      if(my !== token) return;
+      warming = false;                       // shield stays see-through until the first guess
+      makeChoices(); renderUI(); startTimer();
+    }, P.warm + 250);
+  };
+  setTimeout(step, 300);
+}
+
+function makeChoices(){
+  const a = P.m + P.n - 2;           // 0-based index of the last blacked-out card
+  const correct = fifo[a];
+  const pool = deckCards().filter(c => !same(c, correct));
+  shuffle(pool);
+  choices = shuffle([correct, ...pool.slice(0, P.k-1)]);
+}
+
+/* FIFO step: a new card glides in from the left, everything shifts one slot,
+   the last card glides out on the right. Empty slots (null) occur during warm-up. */
+function pushCard(){
+  const c = randCard();
+  c.el = cardEl(c, 'mv');
+  c.el.style.transform = slotX(-1); c.el.style.opacity = 0;
+  fifoStage.insertBefore(c.el, shield);
+  void c.el.offsetWidth;                 // force reflow so the start state is committed
+  fifo.unshift(c);
+  const gone = fifo.pop();
+  fifo.forEach((x,idx) => { if(x) moveTo(x.el, idx); });
+  if(gone) leave(gone.el);
+}
+
+function choose(i){
+  if(warming || i<0 || i>=choices.length) return;
+  const guess = choices[i];
+  const a = P.m + P.n - 2, b = a + 1;
+  const ok = same(guess, fifo[a]);
+  const dt = performance.now() - tStart;     // response time of this entry
+  stopTimer(); notice = '';
+
+  // Ramp-up: in the first entries after a start/reset only errors are counted;
+  // successes are shown (soft marking) but ignored in statistics and averages.
+  const counted = !ok || seqIdx >= rampN();
+  seqIdx++;
+  if(counted){
+    stats.sumT += dt; stats.nT++; stats.last = dt;
+    if(ok){ stats.ok++; stats.streak++; stats.best = Math.max(stats.best, stats.streak); }
+    else { stats.ko++; stats.streak = 0; }
+  }
+  addHist(ok, dt, counted);
+  clearKeys();
+
+  firstGuessDone = true; applyPeek();        // first entry closes the shield; later cards slide in under it
+  pushCard();
+
+  // --- Log: entries travel with their cards; the new one drops in at the first visible slot
+  const goneLog = log.pop(); log.unshift(null);
+  log.forEach((x,idx) => { if(x) moveTo(x.el, idx); });
+  if(goneLog) leave(goneLog.el);
+  const entry = {card:guess, ok};
+  entry.el = cardEl(guess, 'mv ' + (ok ? 'ok' : 'ko') + (counted ? '' : ' soft'));
+  entry.el.style.transform = 'translate(' + (b*W) + 'px,-14px) scale(.85)';
+  entry.el.style.opacity = 0;
+  logStage.appendChild(entry.el);
+  void entry.el.offsetWidth;
+  moveTo(entry.el, b);
+  log[b] = entry;
+
+  makeChoices();
+  renderUI();
+  startTimer();
+}
+
+function renderUI(){
+  const ch = $('choices'); ch.innerHTML = '';
+  const rampLeft = Math.max(0, rampN() - seqIdx);
+  $('status').textContent = notice + (warming
+    ? 'Warm-up (not counted): memorise the cards as they slide in … ' + warmDone + ' / ' + warmTotal
+    : (rampLeft > 0 ? 'Ramp-up: only errors count for ' + rampLeft + ' more ' + (rampLeft===1?'entry':'entries') : ''));
+  choices.forEach((c,i)=>{
+    const e = cardEl(c, '', 'button'); e.type='button';
+    const n = document.createElement('span'); n.className='n'; n.textContent = (i+1)%10;
+    e.appendChild(n);
+    e.addEventListener('click', () => choose(i));
+    ch.appendChild(e);
+  });
+  const tot = stats.ok + stats.ko;
+  $('sOK').textContent = stats.ok;
+  $('sKO').textContent = stats.ko;
+  $('sPct').textContent = tot ? Math.round(100*stats.ok/tot)+' %' : '–';
+  $('sStreak').firstChild.textContent = stats.streak + ' ';
+  $('sBest').textContent = stats.best;
+  $('sAvg').textContent = stats.nT ? fmt(stats.sumT/stats.nT) : '–';
+  $('sLast').textContent = stats.last!=null ? fmt(stats.last) : '–';
+  $('keyHint').textContent =
+    'Keys: numpad 1–'+Math.min(P.k,9)+(P.k>=10?' (0 = 10)':'')+' = choice number' +
+    (P.digits==='index' ? ' (top-row digits too)' : '; top-row digits = rank (1 = A, 0 = 10)') +
+    '. Letters: rank A K Q J T(=10), suit S H D C (e.g. "k" then "h", or "hk"); once only one choice fits it is picked. Esc clears.';
+  updateTyped();
+}
+
+/* ---------- history, moving averages, charts ---------- */
+// hist entry: [ok (1/0), response time in ms or null (timeout), index into cfgList, counted (1/0)]
+// cfgList holds the parameter sets (objects); a new one is used after every parameter change.
+let hist = [], cfgList = [], saveTimer = null;
+
+function loadHist(){
+  try{
+    const j = JSON.parse(localStorage.getItem('fifoMemHist'));
+    if(j && Array.isArray(j.h) && Array.isArray(j.c)){ hist = j.h; cfgList = j.c; }
+  }catch(e){}
+}
+function saveHist(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try{ localStorage.setItem('fifoMemHist', JSON.stringify({h:hist, c:cfgList})); }catch(e){}
+  }, 400);
+}
+// Parameters that influence the results.
+function cfgSnapshot(){
+  return {L:P.L, m:P.m, n:P.n, k:P.k, suits:P.suits, ranks:P.ranks, timeoutS:P.timeout, rampUp:rampN()};
+}
+// Short label for chart markers (older stored history may contain plain strings).
+function cfgLabel(c){
+  if(typeof c === 'string') return c;
+  return 'L'+c.L+' m'+c.m+' n'+c.n+' k'+c.k+' '+c.suits+'×'+c.ranks + (c.timeoutS ? ' '+c.timeoutS+'s' : '');
+}
+function cfgIndex(){
+  const snap = cfgSnapshot(), key = JSON.stringify(snap);
+  let i = cfgList.findIndex(c => JSON.stringify(c) === key);
+  if(i < 0){ cfgList.push(snap); i = cfgList.length - 1; }
+  return i;
+}
+function addHist(ok, t, counted){
+  hist.push([ok ? 1 : 0, t==null ? null : Math.round(t), cfgIndex(), counted ? 1 : 0]);
+  if(hist.length > MAX_HIST) hist.splice(0, hist.length - MAX_HIST);
+  saveHist(); drawCharts();
+}
+const isCounted = e => e[3] !== 0;          // entries from older versions have no flag → counted
+
+// Trailing moving average over the last `win` entries; null values are skipped.
+function movAvg(vals, win){
+  const out = []; let sum = 0, cnt = 0;
+  for(let i=0;i<vals.length;i++){
+    if(vals[i] != null){ sum += vals[i]; cnt++; }
+    const j = i - win;
+    if(j >= 0 && vals[j] != null){ sum -= vals[j]; cnt--; }
+    out.push(cnt ? sum/cnt : null);
+  }
+  return out;
+}
+function niceMax(v){
+  const p = Math.pow(10, Math.floor(Math.log10(v))), f = v/p;
+  return (f<=1 ? 1 : f<=2 ? 2 : f<=5 ? 5 : 10) * p;
+}
+
+function drawChart(cv, o){
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if(!w || !h) return;
+  cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  const g = cv.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,w,h);
+  const cs = getComputedStyle(document.documentElement), col = n => cs.getPropertyValue(n).trim();
+  const padL = 40, padR = 8, padT = 16, padB = 18, pw = w-padL-padR, ph = h-padT-padB;
+  const n = o.vals.length, s = o.start, cnt = n - s;
+  g.font = '10px system-ui,sans-serif'; g.lineWidth = 1;
+  // grid + y labels
+  g.strokeStyle = col('--line'); g.fillStyle = col('--muted'); g.textAlign = 'right'; g.textBaseline = 'middle';
+  for(let k=0;k<=4;k++){
+    const y = padT + ph*(1-k/4);
+    g.beginPath(); g.moveTo(padL,y); g.lineTo(w-padR,y); g.stroke();
+    g.fillText(o.fmtY(o.yMax*k/4), padL-4, y);
+  }
+  if(cnt <= 0){ g.textAlign = 'center'; g.fillText('No data yet', padL+pw/2, padT+ph/2); return; }
+  const X = i => padL + (cnt>1 ? (i-s)/(cnt-1)*pw : pw/2);
+  const Y = v => padT + ph*(1 - Math.min(v,o.yMax)/o.yMax);
+  // x labels: entry numbers
+  g.textBaseline = 'top'; g.textAlign = 'left'; g.fillText('#'+(s+1), padL, h-padB+4);
+  g.textAlign = 'right'; g.fillText('#'+n, w-padR, h-padB+4);
+  // markers where the parameter set changed
+  g.setLineDash([3,3]); g.textAlign = 'left'; g.textBaseline = 'top';
+  let lastLabel = -1e9;
+  for(let i=s+1;i<n;i++){
+    if(hist[i][2] === hist[i-1][2]) continue;
+    const x = X(i);
+    g.beginPath(); g.moveTo(x,padT); g.lineTo(x,padT+ph); g.stroke();
+    if(x - lastLabel > 110){ g.fillText(cfgLabel(cfgList[hist[i][2]]), x+3, 2); lastLabel = x; }
+  }
+  g.setLineDash([]);
+  // raw values as faint dots
+  g.fillStyle = col('--muted'); g.globalAlpha = .4;
+  for(let i=s;i<n;i++) if(o.vals[i] != null){ g.beginPath(); g.arc(X(i), Y(o.vals[i]), 2, 0, 6.2832); g.fill(); }
+  g.globalAlpha = 1;
+  // moving averages
+  const line = (arr, color) => {
+    g.strokeStyle = color; g.lineWidth = 2; g.beginPath();
+    let pen = false;
+    for(let i=s;i<n;i++){
+      if(arr[i] == null){ pen = false; continue; }
+      if(pen) g.lineTo(X(i), Y(arr[i])); else { g.moveTo(X(i), Y(arr[i])); pen = true; }
+    }
+    g.stroke();
+  };
+  line(o.long, col('--c-long')); line(o.short, col('--c-short'));
+}
+
+function drawCharts(){
+  const n = hist.length, s = P.cn > 0 ? Math.max(0, n - P.cn) : 0;
+  // uncounted entries (successes during ramp-up) are left out of % and time
+  const pct = hist.map(e => isCounted(e) ? (e[0] ? 100 : 0) : null);
+  const tim = hist.map(e => isCounted(e) && e[1]!=null ? e[1]/1000 : null);
+  const sp = movAvg(pct,P.sw), lp = movAvg(pct,P.lw), st = movAvg(tim,P.sw), lt = movAvg(tim,P.lw);
+  // y scale of the time chart: based on the averages, but also covers most raw points
+  const view = a => a.slice(s).filter(v => v != null);
+  const raw = view(tim).sort((a,b) => a-b);
+  const p90 = raw.length ? raw[Math.floor(.9*(raw.length-1))] : 1;
+  const maMax = Math.max(0, ...view(st), ...view(lt));
+  const yT = niceMax(Math.max(maMax*1.4, p90, .5));
+  drawChart($('cvPct'),  {vals:pct, short:sp, long:lp, yMax:100, fmtY:v => Math.round(v)+'%', start:s});
+  drawChart($('cvTime'), {vals:tim, short:st, long:lt, yMax:yT, fmtY:v => (v<10 ? v.toFixed(1) : Math.round(v))+'s', start:s});
+  const last = a => { for(let i=a.length-1;i>=0;i--) if(a[i]!=null) return a[i]; return null; };
+  const leg = (title, a, b, f) =>
+    '<span><b>'+title+'</b></span>' +
+    '<span><i style="background:var(--c-short)"></i>short ('+P.sw+'): <b>'+(last(a)==null?'–':f(last(a)))+'</b></span>' +
+    '<span><i style="background:var(--c-long)"></i>long ('+P.lw+'): <b>'+(last(b)==null?'–':f(last(b)))+'</b></span>';
+  $('lgPct').innerHTML  = leg('Correct %', sp, lp, v => Math.round(v)+' %');
+  $('lgTime').innerHTML = leg('Response time', st, lt, v => v.toFixed(2)+' s');
+}
+
+/* ---------- export ---------- */
+// The history is exported as segments: one segment per parameter set, starting after each change.
+function buildExport(){
+  const segs = [];
+  hist.forEach(e => {
+    let s = segs[segs.length-1];
+    if(!s || s.ci !== e[2]){ s = {ci:e[2], entries:[]}; segs.push(s); }
+    s.entries.push(e);
+  });
+  return {
+    format: 'fifo-memory-history', version: 1,
+    exported: new Date().toISOString(),
+    currentParams: Object.assign(cfgSnapshot(), {shortWindow:P.sw, longWindow:P.lw}),
+    totalEntries: hist.length,
+    entryFormat: ['ok (1/0)', 'response time in ms (null = timeout)', 'counted (1/0; 0 = success during ramp-up)'],
+    segments: segs.map(s => {
+      const c = cfgList[s.ci];
+      const cnt = s.entries.filter(isCounted);
+      const ok = cnt.filter(e => e[0]).length;
+      const times = cnt.filter(e => e[1] != null).map(e => e[1]);
+      return {
+        params: typeof c === 'string' ? {label:c} : c,
+        summary: {
+          entries: s.entries.length, counted: cnt.length, ok, ko: cnt.length - ok,
+          pct: cnt.length ? +(100*ok/cnt.length).toFixed(1) : null,
+          avgMs: times.length ? Math.round(times.reduce((x,y) => x+y, 0)/times.length) : null
+        },
+        entries: s.entries.map(e => [e[0], e[1], isCounted(e) ? 1 : 0])
+      };
+    })
+  };
+}
+function exportText(){
+  // pretty-print, but keep every entry triple on one line
+  return JSON.stringify(buildExport(), null, 1)
+    .replace(/\[\s*(\d),\s*(-?\d+|null),\s*(\d)\s*\]/g, '[$1,$2,$3]');
+}
+function expNote(t){ $('expMsg').textContent = t; setTimeout(() => { $('expMsg').textContent = ''; }, 3000); }
+$('btnExport').addEventListener('click', () => {
+  if(!hist.length){ expNote('No history yet.'); return; }
+  const name = 'fifo-memory-history-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.json';
+  try{
+    const url = URL.createObjectURL(new Blob([exportText()], {type:'application/json'}));
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    expNote('Exported.');
+  }catch(e){ expNote('Download blocked – use "Copy JSON".'); }
+});
+$('btnCopy').addEventListener('click', async () => {
+  if(!hist.length){ expNote('No history yet.'); return; }
+  try{ await navigator.clipboard.writeText(exportText()); expNote('Copied.'); }
+  catch(e){ expNote('Copy blocked by the browser.'); }
+});
+$('btnClear').addEventListener('click', () => { hist = []; cfgList = []; saveHist(); drawCharts(); });
+let resizeRaf = 0;
+window.addEventListener('resize', () => { cancelAnimationFrame(resizeRaf); resizeRaf = requestAnimationFrame(drawCharts); });
+
+/* ---------- keyboard ---------- */
+function clearKeys(){ keyBuf = {rank:null, suit:null}; clearTimeout(keyTimer); updateTyped(); }
+function updateTyped(){
+  const t = $('typed');
+  const parts = [];
+  if(keyBuf.rank!==null) parts.push(RANKS[keyBuf.rank]);
+  if(keyBuf.suit!==null) parts.push(SUITS[keyBuf.suit]);
+  t.textContent = parts.length ? 'Input: ' + parts.join(' ') + ' …' : '';
+  document.querySelectorAll('#choices button').forEach((b,i)=>{
+    const c = choices[i];
+    const cand = parts.length && (keyBuf.rank===null||c.r===keyBuf.rank) && (keyBuf.suit===null||c.s===keyBuf.suit);
+    b.classList.toggle('cand', !!cand);
+  });
+}
+function resolveKeys(){
+  const cands = [];
+  choices.forEach((c,i)=>{ if((keyBuf.rank===null||c.r===keyBuf.rank)&&(keyBuf.suit===null||c.s===keyBuf.suit)) cands.push(i); });
+  if(cands.length===1){ choose(cands[0]); return; }
+  if(cands.length===0){ clearKeys(); $('typed').textContent='No matching choice.'; return; }
+  updateTyped();
+  clearTimeout(keyTimer); keyTimer = setTimeout(clearKeys, 2500);
+}
+document.addEventListener('keydown', e=>{
+  const tag = (e.target.tagName||'').toLowerCase();
+  if(warming || tag==='input' || tag==='select' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if(k==='escape' || k==='backspace'){ clearKeys(); return; }
+  if(/^[0-9]$/.test(k)){
+    const numpad = e.code && e.code.startsWith('Numpad');
+    if(numpad || P.digits==='index'){
+      const i = k==='0' ? 9 : (+k)-1;
+      if(i < choices.length){ e.preventDefault(); choose(i); }
+    } else {
+      e.preventDefault();
+      keyBuf.rank = k==='1' ? 0 : k==='0' ? 9 : (+k)-1;
+      if(keyBuf.rank >= P.ranks){ clearKeys(); return; }
+      resolveKeys();
+    }
+    return;
+  }
+  if(k in SUIT_KEYS && SUIT_KEYS[k] < P.suits){ e.preventDefault(); keyBuf.suit = SUIT_KEYS[k]; resolveKeys(); return; }
+  if(k in RANK_KEYS && RANK_KEYS[k] < P.ranks){ e.preventDefault(); keyBuf.rank = RANK_KEYS[k]; resolveKeys(); return; }
+  const sym = {'♠':0,'♥':1,'♦':2,'♣':3}[k];
+  if(sym!==undefined && sym<P.suits){ keyBuf.suit = sym; resolveKeys(); }
+});
+
+/* ---------- settings ---------- */
+function fillForm(){
+  $('pL').value = P.L; $('pM').value = P.m; $('pN').value = P.n; $('pK').value = P.k;
+  $('pS').value = P.suits; $('pR').value = P.ranks; $('pRamp').value = P.ramp;
+  $('pD').value = P.digits; $('pP').checked = P.peek; $('pW').value = P.warm; $('pT').value = P.timeout;
+  $('pSW').value = P.sw; $('pLW').value = P.lw; $('pCN').value = P.cn; $('pC').checked = P.compact;
+}
+function applyForm(){
+  const g = id => parseInt($(id).value,10);
+  P.L = g('pL')||DEFAULTS.L; P.m = g('pM')||DEFAULTS.m; P.n = g('pN')||DEFAULTS.n; P.k = g('pK')||DEFAULTS.k;
+  P.suits = g('pS')||4; P.ranks = g('pR')||13;
+  const rv = g('pRamp'); P.ramp = isNaN(rv) ? -1 : rv;
+  P.digits = $('pD').value;
+  P.peek = $('pP').checked;
+  P.warm = Math.max(100, Math.min(3000, g('pW') || DEFAULTS.warm));
+  P.timeout = Math.max(0, Math.min(600, parseFloat($('pT').value) || 0));
+  P.sw = g('pSW') || DEFAULTS.sw; P.lw = g('pLW') || DEFAULTS.lw;
+  const cnv = g('pCN'); P.cn = isNaN(cnv) ? DEFAULTS.cn : cnv;
+  const before = {L:P.L,m:P.m,n:P.n,k:P.k};
+  validate();
+  const changed = Object.keys(before).filter(x => before[x]!==P[x]);
+  $('msg').textContent = changed.length
+    ? 'Adjusted to valid values (need m + n ≤ L, k ≤ deck size, max 10): ' + changed.map(x=>x+'='+P[x]).join(', ') : '';
+  fillForm(); saveParams(); newGame(); drawCharts();
+}
+$('btnApply').addEventListener('click', applyForm);
+$('btnReset').addEventListener('click', () => newGame());   // full restart incl. statistics (history is kept)
+$('pP').addEventListener('change', () => { P.peek = $('pP').checked; saveParams(); applyPeek(); });
+// Compact view can be switched at any time without restarting the sequence.
+function toggleCompact(on){ setCompact(on); applyLayout(); drawCharts(); }
+$('btnCompact').addEventListener('click', () => toggleCompact(!P.compact));
+$('pC').addEventListener('change', () => toggleCompact($('pC').checked));
+
+validate();
+fillForm();
+setCompact(P.compact);
+loadHist();
+newGame();
+drawCharts();
+</script>
+</body>
+</html>
